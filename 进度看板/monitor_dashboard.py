@@ -89,6 +89,35 @@ def tail_lines(path: Path, max_bytes: int = 180_000) -> list[str]:
     return text.splitlines()
 
 
+def log_sources(out_dir: Path) -> list[Path]:
+    sources = [out_dir / "patent_python_cleaning.log"]
+    sources.extend(sorted(out_dir.glob("python_cleaning_*_stdout.log")))
+    return [path for path in sources if path.exists()]
+
+
+def combined_log_lines(out_dir: Path) -> list[str]:
+    lines: list[str] = []
+    for path in log_sources(out_dir):
+        lines.extend(tail_lines(path))
+
+    def timestamp(line: str) -> str:
+        return line[:23] if len(line) >= 23 and line[:4].isdigit() else ""
+
+    lines.sort(key=timestamp)
+    return lines[-240:]
+
+
+def latest_log_time(lines: list[str]) -> float | None:
+    for line in reversed(lines):
+        if len(line) < 23 or not line[:4].isdigit():
+            continue
+        try:
+            return datetime.strptime(line[:23], "%Y-%m-%d %H:%M:%S,%f").timestamp()
+        except ValueError:
+            continue
+    return None
+
+
 def file_info(path: Path | None) -> dict:
     if not path or not path.exists():
         return {"exists": False}
@@ -203,10 +232,9 @@ def start_cleaner(root: Path, out_dir: Path) -> dict:
     return {"ok": True, "started": process.pid, "startYear": start_year}
 
 
-def parse_log(log_path: Path) -> tuple[dict[int, dict], list[str]]:
+def parse_log_lines(lines: list[str]) -> tuple[dict[int, dict], list[str]]:
     states: dict[int, dict] = {year: {} for year in YEARS}
-    recent = tail_lines(log_path)
-    for line in recent:
+    for line in lines:
         for key, pattern in LOG_PATTERNS.items():
             match = pattern.search(line)
             if not match:
@@ -234,18 +262,23 @@ def parse_log(log_path: Path) -> tuple[dict[int, dict], list[str]]:
                 state["processedRows"] = state["rawRows"]
             elif key == "skip":
                 state["skippedExisting"] = True
-    return states, recent[-80:]
+    return states, lines[-80:]
 
 
 def build_status(root: Path, db_dir: Path, out_dir: Path) -> dict:
     log_path = out_dir / "patent_python_cleaning.log"
-    log_states, recent = parse_log(log_path)
+    sources = log_sources(out_dir)
+    combined_lines = combined_log_lines(out_dir)
+    log_states, recent = parse_log_lines(combined_lines)
     processes = cleaner_processes()
     cleaner_running = len(processes) > 0
     now_ts = time.time()
     log_stale_seconds = None
-    if log_path.exists():
-        log_stale_seconds = max(0, int(now_ts - log_path.stat().st_mtime))
+    newest_log_ts = latest_log_time(combined_lines)
+    if newest_log_ts is not None:
+        log_stale_seconds = max(0, int(now_ts - newest_log_ts))
+    elif sources:
+        log_stale_seconds = max(0, int(now_ts - max(path.stat().st_mtime for path in sources)))
     year_items = []
 
     total_rows = 0
@@ -312,6 +345,7 @@ def build_status(root: Path, db_dir: Path, out_dir: Path) -> dict:
         "outDir": str(out_dir),
         "logPath": str(log_path),
         "logExists": log_path.exists(),
+        "logSources": [str(path) for path in sources],
         "cleanerRunning": cleaner_running,
         "cleanerProcesses": processes,
         "logStaleSeconds": log_stale_seconds,

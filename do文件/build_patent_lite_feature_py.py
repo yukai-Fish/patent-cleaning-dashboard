@@ -211,6 +211,7 @@ def setup_logging(out_dir: Path) -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
+        force=True,
         handlers=[
             logging.FileHandler(log_file, encoding="utf-8"),
             logging.StreamHandler(sys.stdout),
