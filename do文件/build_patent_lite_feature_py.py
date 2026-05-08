@@ -25,6 +25,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+try:
+    import pyreadstat
+except ImportError:  # pragma: no cover - optional fast writer
+    pyreadstat = None
+
 
 GENERATED_PREFIXES = ("inv_", "__")
 
@@ -383,7 +388,37 @@ def downcast_for_stata(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def stata_date_days(series: pd.Series) -> pd.Series:
+    origin = pd.Timestamp("1960-01-01")
+    dates = pd.to_datetime(series, errors="coerce")
+    return (dates - origin).dt.days.astype("float64")
+
+
+def prepare_for_pyreadstat(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, str]]:
+    out = df.copy()
+    variable_format: dict[str, str] = {}
+    for col in out.columns:
+        if pd.api.types.is_datetime64_any_dtype(out[col]):
+            out[col] = stata_date_days(out[col])
+            variable_format[col] = "%td"
+        elif pd.api.types.is_string_dtype(out[col]):
+            out[col] = out[col].astype("object").where(out[col].notna(), "")
+        elif pd.api.types.is_integer_dtype(out[col]) and str(out[col].dtype).startswith(("Int", "UInt")):
+            out[col] = out[col].astype("float64")
+    return out, variable_format
+
+
 def write_stata(df: pd.DataFrame, path: Path) -> None:
+    if pyreadstat is not None:
+        write_df, variable_format = prepare_for_pyreadstat(df)
+        pyreadstat.write_dta(
+            write_df,
+            path,
+            version=15,
+            variable_format=variable_format,
+        )
+        return
+
     convert_dates = {
         col: "td"
         for col in ["申请日", "app_date", "grant_date"]
