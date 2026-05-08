@@ -1,0 +1,18 @@
+# Raw and generated data
+数据库/
+lite输出/
+*.dta
+*.zip
+*.log
+*.smcl
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Local/editor files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+

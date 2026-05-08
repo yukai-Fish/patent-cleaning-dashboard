@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>专利清洗进度看板</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">Patent Cleaning Monitor</p>
+          <h1>专利清洗进度看板</h1>
+          <p class="subhead">实时读取 Python 清洗日志和输出文件，显示当前年份、年度百分比和整体推进情况。</p>
+        </div>
+        <div class="status-pill" id="connectionState">连接中</div>
+      </section>
+
+      <section class="overview">
+        <div class="metric primary">
+          <span class="label">当前年份</span>
+          <strong id="currentYear">--</strong>
+          <span class="muted" id="currentState">等待日志</span>
+        </div>
+        <div class="metric">
+          <span class="label">本年进度</span>
+          <strong id="yearPercent">0%</strong>
+          <span class="muted" id="yearRows">-- / -- 行</span>
+        </div>
+        <div class="metric">
+          <span class="label">整体进度</span>
+          <strong id="overallPercent">0%</strong>
+          <span class="muted" id="yearCount">0 / 12 年</span>
+        </div>
+        <div class="metric">
+          <span class="label">最后刷新</span>
+          <strong id="updatedAt">--</strong>
+          <span class="muted">每 5 秒自动更新</span>
+        </div>
+      </section>
+
+      <section class="progress-panel">
+        <div class="panel-head">
+          <div>
+            <h2>当前年度进度</h2>
+            <p id="currentDetail">等待清洗任务启动。</p>
+          </div>
+          <span id="logBadge" class="badge">日志未检测</span>
+        </div>
+        <div class="big-progress" aria-label="当前年度进度">
+          <div id="yearBar" class="bar-fill"></div>
+        </div>
+        <div class="overall-strip">
+          <span>1985-2012 已由前序流程完成；此看板追踪 2013-2024 Python 清洗。</span>
+          <div class="mini-progress"><div id="overallBar"></div></div>
+        </div>
+      </section>
+
+      <section class="grid-area">
+        <div class="year-board">
+          <div class="section-title">
+            <h2>年份队列</h2>
+            <span id="workspacePath"></span>
+          </div>
+          <div id="yearGrid" class="year-grid"></div>
+        </div>
+
+        <aside class="log-panel">
+          <div class="section-title">
+            <h2>最近日志</h2>
+            <span id="logPath"></span>
+          </div>
+          <pre id="recentLog">等待日志...</pre>
+        </aside>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
