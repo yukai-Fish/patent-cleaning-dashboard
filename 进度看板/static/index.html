@@ -46,7 +46,15 @@
             <h2>当前年度进度</h2>
             <p id="currentDetail">等待清洗任务启动。</p>
           </div>
-          <span id="logBadge" class="badge">日志未检测</span>
+          <div class="panel-actions">
+            <span id="logBadge" class="badge">日志未检测</span>
+            <button id="startButton" class="control-button start" type="button">继续/重启</button>
+            <button id="stopButton" class="control-button stop" type="button">暂停</button>
+          </div>
+        </div>
+        <div class="runtime-line">
+          <span id="processState">清洗进程：检测中</span>
+          <span id="staleState">日志心跳：检测中</span>
         </div>
         <div class="big-progress" aria-label="当前年度进度">
           <div id="yearBar" class="bar-fill"></div>

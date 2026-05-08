@@ -3,6 +3,7 @@ const refreshMs = 5000;
 const stateNames = {
   completed: "已完成",
   running: "运行中",
+  stopped: "已停止",
   pending: "等待中",
 };
 
@@ -53,6 +54,18 @@ function renderOverview(data) {
   }
 
   $("logBadge").textContent = data.logExists ? "日志已连接" : "等待日志文件";
+  $("processState").textContent = data.cleanerRunning
+    ? `清洗进程：运行中，PID ${data.cleanerProcesses.map((p) => p.pid).join(", ")}`
+    : "清洗进程：已停止";
+  const staleText = data.logStaleSeconds === null || data.logStaleSeconds === undefined
+    ? "日志心跳：暂无日志"
+    : data.logStale
+      ? `日志心跳：${data.logStaleSeconds} 秒未更新，可能卡住`
+      : `日志心跳：${data.logStaleSeconds} 秒前更新`;
+  $("staleState").textContent = staleText;
+  $("staleState").classList.toggle("warn", Boolean(data.logStale));
+  $("startButton").disabled = Boolean(data.cleanerRunning);
+  $("stopButton").disabled = !data.cleanerRunning;
   $("workspacePath").textContent = data.workspace || "";
   $("logPath").textContent = data.logPath || "";
 }
@@ -119,6 +132,27 @@ async function refresh() {
     $("recentLog").textContent = `无法读取进度：${error.message}`;
   }
 }
+
+async function controlCleaner(action) {
+  const startButton = $("startButton");
+  const stopButton = $("stopButton");
+  startButton.disabled = true;
+  stopButton.disabled = true;
+  try {
+    const response = await fetch("/api/control", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action }),
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    await refresh();
+  } catch (error) {
+    setConnection(false, `操作失败：${error.message}`);
+  }
+}
+
+$("startButton").addEventListener("click", () => controlCleaner("start"));
+$("stopButton").addEventListener("click", () => controlCleaner("stop"));
 
 refresh();
 setInterval(refresh, refreshMs);

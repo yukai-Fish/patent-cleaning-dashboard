@@ -6,6 +6,7 @@ import json
 import os
 import re
 import struct
+import subprocess
 import time
 from datetime import datetime
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -24,6 +25,7 @@ LOG_PATTERNS = {
     ),
     "skip": re.compile(r"Year (\d{4}) already exists, skipping"),
 }
+STALE_AFTER_SECONDS = 180
 
 
 def workspace_root() -> Path:
@@ -100,6 +102,107 @@ def file_info(path: Path | None) -> dict:
     }
 
 
+def cleaner_script(root: Path) -> Path:
+    matches = [p for p in root.rglob("build_patent_lite_feature_py.py") if p.is_file()]
+    if not matches:
+        raise FileNotFoundError("Cannot find build_patent_lite_feature_py.py")
+    matches.sort(key=lambda p: len(p.parts))
+    return matches[0]
+
+
+def cleaner_processes() -> list[dict]:
+    command = r"""
+$items = Get-CimInstance Win32_Process |
+  Where-Object { $_.Name -like 'python*' -and $_.CommandLine -like '*build_patent_lite_feature_py.py*' } |
+  Select-Object ProcessId,Name,CommandLine
+if ($items) { $items | ConvertTo-Json -Compress }
+"""
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", command],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+        )
+    except Exception:
+        return []
+    output = result.stdout.strip()
+    if not output:
+        return []
+    try:
+        data = json.loads(output)
+    except json.JSONDecodeError:
+        return []
+    if isinstance(data, dict):
+        data = [data]
+    return [
+        {
+            "pid": item.get("ProcessId"),
+            "name": item.get("Name"),
+            "commandLine": item.get("CommandLine"),
+        }
+        for item in data
+        if item.get("ProcessId")
+    ]
+
+
+def stop_cleaner_processes() -> dict:
+    processes = cleaner_processes()
+    stopped = []
+    for process in processes:
+        pid = process["pid"]
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        stopped.append(pid)
+    return {"ok": True, "stopped": stopped}
+
+
+def next_incomplete_year(out_dir: Path) -> int | None:
+    for year in YEARS:
+        if not (out_dir / f"patent_{year}_lite.dta").exists():
+            return year
+    return None
+
+
+def start_cleaner(root: Path, out_dir: Path) -> dict:
+    existing = cleaner_processes()
+    if existing:
+        return {"ok": True, "alreadyRunning": True, "processes": existing}
+
+    start_year = next_incomplete_year(out_dir)
+    if start_year is None:
+        return {"ok": False, "message": "All years already have output files."}
+
+    script = cleaner_script(root)
+    stdout_path = out_dir / f"python_cleaning_{start_year}_stdout.log"
+    stderr_path = out_dir / f"python_cleaning_{start_year}_stderr.log"
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    with stdout_path.open("ab") as stdout, stderr_path.open("ab") as stderr:
+        process = subprocess.Popen(
+            [
+                "python",
+                "-u",
+                str(script),
+                "--start-year",
+                str(start_year),
+                "--end-year",
+                str(YEARS[-1]),
+            ],
+            cwd=root,
+            stdout=stdout,
+            stderr=stderr,
+            creationflags=creationflags,
+        )
+    return {"ok": True, "started": process.pid, "startYear": start_year}
+
+
 def parse_log(log_path: Path) -> tuple[dict[int, dict], list[str]]:
     states: dict[int, dict] = {year: {} for year in YEARS}
     recent = tail_lines(log_path)
@@ -137,6 +240,12 @@ def parse_log(log_path: Path) -> tuple[dict[int, dict], list[str]]:
 def build_status(root: Path, db_dir: Path, out_dir: Path) -> dict:
     log_path = out_dir / "patent_python_cleaning.log"
     log_states, recent = parse_log(log_path)
+    processes = cleaner_processes()
+    cleaner_running = len(processes) > 0
+    now_ts = time.time()
+    log_stale_seconds = None
+    if log_path.exists():
+        log_stale_seconds = max(0, int(now_ts - log_path.stat().st_mtime))
     year_items = []
 
     total_rows = 0
@@ -163,7 +272,7 @@ def build_status(root: Path, db_dir: Path, out_dir: Path) -> dict:
             if nobs:
                 completed_rows += nobs
         elif state.get("seenRunning") or tmp_exists:
-            status = "running"
+            status = "running" if cleaner_running else "stopped"
             percent = (processed / nobs * 100) if nobs else 0.0
             if current is None:
                 current = year
@@ -203,6 +312,11 @@ def build_status(root: Path, db_dir: Path, out_dir: Path) -> dict:
         "outDir": str(out_dir),
         "logPath": str(log_path),
         "logExists": log_path.exists(),
+        "cleanerRunning": cleaner_running,
+        "cleanerProcesses": processes,
+        "logStaleSeconds": log_stale_seconds,
+        "logStale": bool(cleaner_running and log_stale_seconds is not None and log_stale_seconds > STALE_AFTER_SECONDS),
+        "staleAfterSeconds": STALE_AFTER_SECONDS,
         "updatedAt": datetime.now().isoformat(timespec="seconds"),
         "currentYear": current,
         "current": current_item,
@@ -230,6 +344,29 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         if parsed.path == "/":
             self.path = "/index.html"
         return super().do_GET()
+
+    def do_POST(self) -> None:
+        parsed = urlparse(self.path)
+        if parsed.path != "/api/control":
+            self.send_error(404)
+            return
+
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        raw = self.rfile.read(length) if length else b"{}"
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except json.JSONDecodeError:
+            self.send_error(400, "Invalid JSON")
+            return
+
+        action = payload.get("action")
+        if action == "start":
+            self.send_json(start_cleaner(self.root, self.out_dir))
+            return
+        if action == "stop":
+            self.send_json(stop_cleaner_processes())
+            return
+        self.send_error(400, "Unknown action")
 
     def translate_path(self, path: str) -> str:
         parsed = urlparse(path)
