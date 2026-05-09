@@ -292,6 +292,20 @@ def read_stata_chunks(infile: Path, chunksize: int):
         return pd.read_stata(str(infile), chunksize=chunksize, convert_categoricals=False)
 
 
+def existing_stream_chunks(chunk_dir: Path) -> list[Path]:
+    chunks = sorted(chunk_dir.glob("chunk_*.parquet"))
+    expected = []
+    for index, path in enumerate(chunks, start=1):
+        if path.name != f"chunk_{index:04d}.parquet":
+            break
+        expected.append(path)
+    return expected
+
+
+def parquet_row_count(path: Path) -> int:
+    return int(pd.read_parquet(path, columns=["dup_key"]).shape[0])
+
+
 def status_path(out_dir: Path) -> Path:
     return out_dir / "patent_cleaning_status.json"
 
@@ -557,9 +571,12 @@ def clean_one_year_streaming(
     chunk_dir = tmp_dir / "chunks"
     parts_tmp_dir = out_dir / f"patent_{year}_lite_parts.tmp"
     duckdb_path = tmp_dir / "dedup.duckdb"
-    for path in [tmp_dir, parts_tmp_dir]:
-        if path.exists():
-            shutil.rmtree(path)
+    if overwrite and tmp_dir.exists():
+        shutil.rmtree(tmp_dir)
+    if parts_tmp_dir.exists():
+        shutil.rmtree(parts_tmp_dir)
+    if duckdb_path.exists():
+        duckdb_path.unlink()
     chunk_dir.mkdir(parents=True, exist_ok=True)
     parts_tmp_dir.mkdir(parents=True, exist_ok=True)
 
@@ -570,13 +587,34 @@ def clean_one_year_streaming(
     write_status(out_dir, year=year, phase="starting", message=f"Year {year}: starting streaming mode", processedRows=0)
 
     started = time.time()
-    rows_raw = 0
-    rows_chunk_clean = 0
-    chunk_files: list[Path] = []
+    chunk_files: list[Path] = existing_stream_chunks(chunk_dir)
+    resume_chunks = len(chunk_files)
+    rows_raw = resume_chunks * chunksize
+    rows_chunk_clean = sum(parquet_row_count(path) for path in chunk_files)
+    if resume_chunks:
+        logging.info(
+            "Year %s resume: found %s existing chunk files; continuing after raw rows processed = %s",
+            year,
+            resume_chunks,
+            rows_raw,
+        )
+    else:
+        rows_raw = 0
+        rows_chunk_clean = 0
     reader = read_stata_chunks(infile, chunksize)
-    write_status(out_dir, year=year, phase="reading", message=f"Year {year}: reading and writing cleaned chunks", processedRows=0)
+    write_status(
+        out_dir,
+        year=year,
+        phase="reading",
+        message=f"Year {year}: reading and writing cleaned chunks",
+        processedRows=rows_raw,
+        chunk=resume_chunks,
+    )
 
     for chunk_no, chunk in enumerate(reader, start=1):
+        if chunk_no <= resume_chunks:
+            del chunk
+            continue
         if max_rows is not None:
             remaining = max_rows - rows_raw
             if remaining <= 0:
