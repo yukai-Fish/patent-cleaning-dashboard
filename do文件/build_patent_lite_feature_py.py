@@ -101,6 +101,43 @@ DROP_COLUMNS = [
     "优先权日",
 ]
 
+RAW_KEEP_COLUMNS = [
+    "newipzlid",
+    "年份",
+    "申请日",
+    "标题",
+    "摘要",
+    "申请人",
+    "公开公告号",
+    "公开公告日",
+    "申请号",
+    "专利类型",
+    "首项权利要求",
+    "独立权利要求",
+    "文献页数",
+    "IPC主分类",
+    "IPC",
+    "当前权利人",
+    "申请人类型",
+    "发明人",
+    "引证次数",
+    "被引证次数",
+    "自引次数",
+    "他引次数",
+    "被自引次数",
+    "被他引次数",
+    "家族引证次数",
+    "家族被引证次数",
+    "授权公告号",
+    "授权公告日",
+    "省",
+    "省代码",
+    "市",
+    "市代码",
+    "县",
+    "县代码",
+]
+
 FIRST_COLUMNS = [
     "newipzlid",
     "年份",
@@ -236,6 +273,23 @@ def setup_logging(out_dir: Path) -> None:
             logging.StreamHandler(sys.stdout),
         ],
     )
+
+
+def read_stata_chunks(infile: Path, chunksize: int):
+    try:
+        return pd.read_stata(
+            str(infile),
+            chunksize=chunksize,
+            convert_categoricals=False,
+            columns=RAW_KEEP_COLUMNS,
+        )
+    except Exception as exc:
+        logging.warning(
+            "Column-selective read failed for %s (%s). Falling back to full-column read.",
+            infile,
+            exc,
+        )
+        return pd.read_stata(str(infile), chunksize=chunksize, convert_categoricals=False)
 
 
 def status_path(out_dir: Path) -> Path:
@@ -519,7 +573,7 @@ def clean_one_year_streaming(
     rows_raw = 0
     rows_chunk_clean = 0
     chunk_files: list[Path] = []
-    reader = pd.read_stata(str(infile), chunksize=chunksize, convert_categoricals=False)
+    reader = read_stata_chunks(infile, chunksize)
     write_status(out_dir, year=year, phase="reading", message=f"Year {year}: reading and writing cleaned chunks", processedRows=0)
 
     for chunk_no, chunk in enumerate(reader, start=1):
@@ -717,7 +771,7 @@ def clean_one_year(
         processedRows=0,
         output=str(outfile),
     )
-    reader = pd.read_stata(str(infile), chunksize=chunksize, convert_categoricals=False)
+    reader = read_stata_chunks(infile, chunksize)
     for chunk_no, chunk in enumerate(reader, start=1):
         if max_rows is not None:
             remaining = max_rows - rows_raw

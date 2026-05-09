@@ -185,9 +185,21 @@ def cleaner_script(root: Path) -> Path:
 def cleaner_processes() -> list[dict]:
     command = r"""
 $items = Get-CimInstance Win32_Process |
-  Where-Object { $_.Name -like 'python*' -and $_.CommandLine -like '*build_patent_lite_feature_py.py*' } |
-  Select-Object ProcessId,Name,CommandLine
-if ($items) { $items | ConvertTo-Json -Compress }
+  Where-Object { $_.Name -like 'python*' -and $_.CommandLine -like '*build_patent_lite_feature_py.py*' }
+if ($items) {
+  $items | ForEach-Object {
+    $proc = Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue
+    [pscustomobject]@{
+      ProcessId = $_.ProcessId
+      Name = $_.Name
+      CommandLine = $_.CommandLine
+      CPU = if ($proc) { $proc.CPU } else { $null }
+      WorkingSet64 = if ($proc) { $proc.WorkingSet64 } else { $null }
+      PrivateMemorySize64 = if ($proc) { $proc.PrivateMemorySize64 } else { $null }
+      StartTime = if ($proc -and $proc.StartTime) { $proc.StartTime.ToString("s") } else { $null }
+    }
+  } | ConvertTo-Json -Compress
+}
 """
     try:
         result = subprocess.run(
@@ -215,6 +227,10 @@ if ($items) { $items | ConvertTo-Json -Compress }
             "pid": item.get("ProcessId"),
             "name": item.get("Name"),
             "commandLine": item.get("CommandLine"),
+            "cpuSeconds": item.get("CPU"),
+            "workingSetBytes": item.get("WorkingSet64"),
+            "privateBytes": item.get("PrivateMemorySize64"),
+            "startTime": item.get("StartTime"),
         }
         for item in data
         if item.get("ProcessId")

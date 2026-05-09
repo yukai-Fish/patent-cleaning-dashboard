@@ -33,6 +33,11 @@ function formatPercent(value) {
   return `${number.toFixed(number >= 99.95 || number === 0 ? 0 : 2)}%`;
 }
 
+function formatGBFromBytes(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "--";
+  return (Number(value) / 1024 / 1024 / 1024).toFixed(2);
+}
+
 function setConnection(ok, text) {
   const el = $("connectionState");
   el.textContent = text;
@@ -69,13 +74,22 @@ function renderOverview(data) {
   }
 
   $("logBadge").textContent = data.logExists ? "日志已连接" : "等待日志文件";
-  $("processState").textContent = data.cleanerRunning
-    ? `清洗进程：运行中，PID ${data.cleanerProcesses.map((p) => p.pid).join(", ")}`
-    : "清洗进程：已停止";
+  if (data.cleanerRunning) {
+    const details = data.cleanerProcesses.map((p) => {
+      const memory = formatGBFromBytes(p.privateBytes || p.workingSetBytes);
+      const cpu = p.cpuSeconds === null || p.cpuSeconds === undefined
+        ? "--"
+        : Number(p.cpuSeconds).toFixed(0);
+      return `PID ${p.pid}，内存 ${memory} GB，CPU ${cpu} 秒`;
+    }).join("；");
+    $("processState").textContent = `清洗进程：运行中，${details}`;
+  } else {
+    $("processState").textContent = "清洗进程：已停止";
+  }
   const staleText = data.logStaleSeconds === null || data.logStaleSeconds === undefined
     ? "日志心跳：暂无日志"
     : data.logStale
-      ? `日志心跳：${data.logStaleSeconds} 秒未更新，可能卡住`
+      ? `日志心跳：${data.logStaleSeconds} 秒未更新；如果进程仍在运行，多半是在等待下一块 dta 读完`
       : `日志心跳：${data.logStaleSeconds} 秒前更新`;
   $("staleState").textContent = staleText;
   $("staleState").classList.toggle("warn", Boolean(data.logStale));
