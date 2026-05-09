@@ -131,6 +131,19 @@ def file_info(path: Path | None) -> dict:
     }
 
 
+def load_runtime_status(out_dir: Path) -> dict:
+    path = out_dir / "patent_cleaning_status.json"
+    if not path.exists():
+        return {"exists": False}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {"exists": True, "error": str(exc), "path": str(path)}
+    data["exists"] = True
+    data["path"] = str(path)
+    return data
+
+
 def cleaner_script(root: Path) -> Path:
     matches = [p for p in root.rglob("build_patent_lite_feature_py.py") if p.is_file()]
     if not matches:
@@ -245,14 +258,17 @@ def parse_log_lines(lines: list[str]) -> tuple[dict[int, dict], list[str]]:
             state = states[year]
             state["lastLogLine"] = line
             if key == "cleaning":
-                state["seenRunning"] = True
+                states[year] = {"seenRunning": True, "lastLogLine": line, "phase": "starting"}
             elif key == "chunk":
                 state["processedRows"] = int(match.group(2).replace(",", ""))
                 state["seenRunning"] = True
+                state["phase"] = "reading"
             elif key == "before":
                 state["beforeDedup"] = int(match.group(2).replace(",", ""))
+                state["phase"] = "deduplicating"
             elif key == "after":
                 state["afterDedup"] = int(match.group(2).replace(",", ""))
+                state["phase"] = "writing"
             elif key == "complete":
                 state["rawRows"] = int(match.group(2).replace(",", ""))
                 state["beforeDedup"] = int(match.group(3).replace(",", ""))
@@ -260,6 +276,7 @@ def parse_log_lines(lines: list[str]) -> tuple[dict[int, dict], list[str]]:
                 state["elapsedMin"] = float(match.group(5))
                 state["completeInLog"] = True
                 state["processedRows"] = state["rawRows"]
+                state["phase"] = "complete"
             elif key == "skip":
                 state["skippedExisting"] = True
     return states, lines[-80:]
@@ -271,6 +288,7 @@ def build_status(root: Path, db_dir: Path, out_dir: Path) -> dict:
     combined_lines = combined_log_lines(out_dir)
     log_states, recent = parse_log_lines(combined_lines)
     processes = cleaner_processes()
+    runtime_status = load_runtime_status(out_dir)
     cleaner_running = len(processes) > 0
     now_ts = time.time()
     log_stale_seconds = None
@@ -279,6 +297,14 @@ def build_status(root: Path, db_dir: Path, out_dir: Path) -> dict:
         log_stale_seconds = max(0, int(now_ts - newest_log_ts))
     elif sources:
         log_stale_seconds = max(0, int(now_ts - max(path.stat().st_mtime for path in sources)))
+    if runtime_status.get("exists") and runtime_status.get("updatedAt"):
+        try:
+            status_ts = datetime.strptime(str(runtime_status["updatedAt"]), "%Y-%m-%d %H:%M:%S").timestamp()
+            status_age = max(0, int(now_ts - status_ts))
+            if log_stale_seconds is None or status_age < log_stale_seconds:
+                log_stale_seconds = status_age
+        except ValueError:
+            pass
     year_items = []
 
     total_rows = 0
@@ -324,11 +350,21 @@ def build_status(root: Path, db_dir: Path, out_dir: Path) -> dict:
             "beforeDedup": state.get("beforeDedup"),
             "afterDedup": state.get("afterDedup"),
             "elapsedMin": state.get("elapsedMin"),
+            "runtimePhase": state.get("phase"),
+            "runtimeMessage": None,
             "rawFile": file_info(raw_file),
             "outputFile": file_info(output_file),
             "tempFile": file_info(tmp_file),
             "lastLogLine": state.get("lastLogLine"),
         }
+        if runtime_status.get("exists") and runtime_status.get("year") == year:
+            item["runtimePhase"] = runtime_status.get("phase")
+            item["runtimeMessage"] = runtime_status.get("message")
+            item["runtimeStatus"] = runtime_status
+            if runtime_status.get("processedRows") is not None and not output_exists:
+                item["processedRows"] = runtime_status.get("processedRows")
+                processed = item["processedRows"]
+                item["percent"] = round(max(0.0, min((processed / nobs * 100) if nobs else 0.0, 100.0)), 2)
         year_items.append(item)
 
     if current is None:
@@ -348,6 +384,7 @@ def build_status(root: Path, db_dir: Path, out_dir: Path) -> dict:
         "logSources": [str(path) for path in sources],
         "cleanerRunning": cleaner_running,
         "cleanerProcesses": processes,
+        "runtimeStatus": runtime_status,
         "logStaleSeconds": log_stale_seconds,
         "logStale": bool(cleaner_running and log_stale_seconds is not None and log_stale_seconds > STALE_AFTER_SECONDS),
         "staleAfterSeconds": STALE_AFTER_SECONDS,

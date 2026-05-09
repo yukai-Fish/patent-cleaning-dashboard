@@ -7,6 +7,18 @@ const stateNames = {
   pending: "等待中",
 };
 
+const phaseNames = {
+  starting: "正在启动",
+  reading: "正在读取原始数据",
+  concatenating: "正在合并数据块",
+  deduplicating: "正在排序去重",
+  downcasting: "正在压缩列类型",
+  writing: "正在写出 dta 文件",
+  finalizing: "正在保存最终文件",
+  complete: "已完成",
+  empty: "没有读取到数据",
+};
+
 function $(id) {
   return document.getElementById(id);
 }
@@ -43,10 +55,13 @@ function renderOverview(data) {
   $("overallBar").style.width = `${data.overallPercent || 0}%`;
 
   if (current) {
+    const phaseText = current.runtimePhase
+      ? `阶段：${phaseNames[current.runtimePhase] || current.runtimePhase}`
+      : "";
     const detail = current.status === "completed"
       ? `${current.year} 年已经完成，输出文件 ${(current.outputFile && current.outputFile.sizeGB) || "--"} GB。`
       : current.status === "running"
-        ? `${current.year} 年正在处理，已读 ${formatNumber(current.processedRows)} 行，总计 ${formatNumber(current.totalRows)} 行。`
+        ? `${current.year} 年正在处理，已读 ${formatNumber(current.processedRows)} 行，总计 ${formatNumber(current.totalRows)} 行。${phaseText ? " " + phaseText : ""}`
         : `${current.year} 年尚未开始；页面会在日志更新后自动切换。`;
     $("currentDetail").textContent = detail;
   } else {
@@ -95,11 +110,13 @@ function renderYears(years) {
     const elapsed = item.elapsedMin ? `${Number(item.elapsedMin).toFixed(1)} 分钟` : "--";
     const size = item.rawFile && item.rawFile.exists ? `${item.rawFile.sizeGB} GB` : "--";
     const output = item.outputFile && item.outputFile.exists ? `${item.outputFile.sizeGB} GB` : "未生成";
+    const phase = item.runtimePhase ? (phaseNames[item.runtimePhase] || item.runtimePhase) : "--";
     meta.innerHTML = `
       <span>进度：${formatPercent(item.percent)}</span>
       <span>行数：${formatNumber(item.processedRows)} / ${formatNumber(item.totalRows)}</span>
       <span>原始文件：${size}</span>
       <span>输出文件：${output}</span>
+      <span>阶段：${phase}</span>
       <span>耗时：${elapsed}</span>
     `;
 

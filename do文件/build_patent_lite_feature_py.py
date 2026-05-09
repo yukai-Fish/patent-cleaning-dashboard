@@ -14,6 +14,7 @@ completed years can be skipped safely after an interruption.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import math
 import os
@@ -217,6 +218,21 @@ def setup_logging(out_dir: Path) -> None:
             logging.StreamHandler(sys.stdout),
         ],
     )
+
+
+def status_path(out_dir: Path) -> Path:
+    return out_dir / "patent_cleaning_status.json"
+
+
+def write_status(out_dir: Path, **status: object) -> None:
+    payload = {
+        "updatedAt": time.strftime("%Y-%m-%d %H:%M:%S"),
+        **status,
+    }
+    path = status_path(out_dir)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def drop_generated_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -458,10 +474,26 @@ def clean_one_year(
     logging.info("Cleaning year %s", year)
     logging.info("Input: %s", infile)
     logging.info("Output: %s", outfile)
+    write_status(
+        out_dir,
+        year=year,
+        phase="starting",
+        message=f"Year {year}: starting",
+        processedRows=0,
+        output=str(outfile),
+    )
 
     started = time.time()
     chunks: list[pd.DataFrame] = []
     rows_raw = 0
+    write_status(
+        out_dir,
+        year=year,
+        phase="reading",
+        message=f"Year {year}: reading raw .dta chunks",
+        processedRows=0,
+        output=str(outfile),
+    )
     reader = pd.read_stata(str(infile), chunksize=chunksize, convert_categoricals=False)
     for chunk_no, chunk in enumerate(reader, start=1):
         if max_rows is not None:
@@ -472,26 +504,91 @@ def clean_one_year(
         rows_raw += len(chunk)
         chunks.append(clean_chunk(chunk, year))
         logging.info("Year %s chunk %s: raw rows processed = %s", year, chunk_no, rows_raw)
+        write_status(
+            out_dir,
+            year=year,
+            phase="reading",
+            message=f"Year {year}: reading raw .dta chunks",
+            processedRows=rows_raw,
+            chunk=chunk_no,
+            output=str(outfile),
+        )
         if max_rows is not None and rows_raw >= max_rows:
             break
 
     if not chunks:
         logging.warning("Year %s has no rows after reading.", year)
+        write_status(out_dir, year=year, phase="empty", message=f"Year {year}: no rows found", processedRows=0)
         return
 
+    logging.info("Year %s finished reading all chunks; concatenating cleaned chunks", year)
+    write_status(
+        out_dir,
+        year=year,
+        phase="concatenating",
+        message=f"Year {year}: concatenating cleaned chunks",
+        processedRows=rows_raw,
+        chunkCount=len(chunks),
+        output=str(outfile),
+    )
     df = pd.concat(chunks, ignore_index=True)
     rows_before = len(df)
     logging.info("Year %s before single-year dedup rows = %s", year, rows_before)
 
+    logging.info("Year %s sorting and deduplicating rows", year)
+    write_status(
+        out_dir,
+        year=year,
+        phase="deduplicating",
+        message=f"Year {year}: sorting and deduplicating rows",
+        processedRows=rows_raw,
+        beforeDedup=rows_before,
+        output=str(outfile),
+    )
     df = df.sort_values(["dup_key", "type_rank", "file_year"], kind="mergesort")
     df = df.drop_duplicates(subset=["dup_key"], keep="first").reset_index(drop=True)
     rows_after = len(df)
     logging.info("Year %s after single-year dedup rows = %s", year, rows_after)
 
+    logging.info("Year %s downcasting columns before writing", year)
+    write_status(
+        out_dir,
+        year=year,
+        phase="downcasting",
+        message=f"Year {year}: downcasting columns before writing",
+        processedRows=rows_raw,
+        beforeDedup=rows_before,
+        afterDedup=rows_after,
+        output=str(outfile),
+    )
     df = downcast_for_stata(df)
     if tmpfile.exists():
         tmpfile.unlink()
+    logging.info("Year %s writing Stata output file", year)
+    write_status(
+        out_dir,
+        year=year,
+        phase="writing",
+        message=f"Year {year}: writing Stata output file",
+        processedRows=rows_raw,
+        beforeDedup=rows_before,
+        afterDedup=rows_after,
+        tempOutput=str(tmpfile),
+        output=str(outfile),
+    )
     write_stata(df, tmpfile)
+    logging.info("Year %s moving temporary output into final path", year)
+    write_status(
+        out_dir,
+        year=year,
+        phase="finalizing",
+        message=f"Year {year}: moving temporary output into final path",
+        processedRows=rows_raw,
+        beforeDedup=rows_before,
+        afterDedup=rows_after,
+        tempOutput=str(tmpfile),
+        output=str(outfile),
+    )
     os.replace(tmpfile, outfile)
 
     elapsed = time.time() - started
@@ -502,6 +599,17 @@ def clean_one_year(
         rows_before,
         rows_after,
         elapsed / 60,
+    )
+    write_status(
+        out_dir,
+        year=year,
+        phase="complete",
+        message=f"Year {year}: complete",
+        processedRows=rows_raw,
+        beforeDedup=rows_before,
+        afterDedup=rows_after,
+        elapsedMin=round(elapsed / 60, 2),
+        output=str(outfile),
     )
 
 
