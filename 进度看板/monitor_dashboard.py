@@ -57,6 +57,36 @@ def find_year_file(root: Path, year: int) -> Path | None:
     return matches[0]
 
 
+def parts_dir_for(out_dir: Path, year: int) -> Path:
+    return out_dir / f"patent_{year}_lite_parts"
+
+
+def parts_manifest_for(out_dir: Path, year: int) -> Path:
+    return parts_dir_for(out_dir, year) / "manifest.json"
+
+
+def partition_info(out_dir: Path, year: int) -> dict:
+    parts_dir = parts_dir_for(out_dir, year)
+    manifest = parts_manifest_for(out_dir, year)
+    if not manifest.exists():
+        return {"exists": False}
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+    except Exception:
+        data = {}
+    part_files = sorted(parts_dir.glob("patent_*_lite_part*.dta"))
+    total_size = sum(path.stat().st_size for path in part_files if path.exists())
+    return {
+        "exists": True,
+        "path": str(parts_dir),
+        "partCount": data.get("partCount") or len(part_files),
+        "totalRows": data.get("afterDedup") or data.get("totalRows"),
+        "sizeBytes": total_size,
+        "sizeGB": round(total_size / (1024**3), 2),
+        "modified": datetime.fromtimestamp(manifest.stat().st_mtime).isoformat(timespec="seconds"),
+    }
+
+
 def read_stata_nobs(path: Path) -> int | None:
     try:
         with path.open("rb") as handle:
@@ -208,7 +238,7 @@ def stop_cleaner_processes() -> dict:
 
 def next_incomplete_year(out_dir: Path) -> int | None:
     for year in YEARS:
-        if not (out_dir / f"patent_{year}_lite.dta").exists():
+        if not (out_dir / f"patent_{year}_lite.dta").exists() and not parts_manifest_for(out_dir, year).exists():
             return year
     return None
 
@@ -236,6 +266,8 @@ def start_cleaner(root: Path, out_dir: Path) -> dict:
                 str(start_year),
                 "--end-year",
                 str(YEARS[-1]),
+                "--engine",
+                "streaming",
             ],
             cwd=root,
             stdout=stdout,
@@ -315,6 +347,7 @@ def build_status(root: Path, db_dir: Path, out_dir: Path) -> dict:
         raw_file = find_year_file(db_dir, year)
         output_file = out_dir / f"patent_{year}_lite.dta"
         tmp_file = out_dir / f"patent_{year}_lite.tmp.dta"
+        parts = partition_info(out_dir, year)
         nobs = read_stata_nobs(raw_file) if raw_file else None
         if nobs:
             total_rows += nobs
@@ -324,7 +357,7 @@ def build_status(root: Path, db_dir: Path, out_dir: Path) -> dict:
         tmp_exists = tmp_file.exists()
         processed = state.get("processedRows", 0)
 
-        if output_exists or state.get("completeInLog") or state.get("skippedExisting"):
+        if output_exists or parts["exists"] or state.get("completeInLog") or state.get("skippedExisting"):
             status = "completed"
             processed = nobs or state.get("rawRows") or processed
             percent = 100.0
@@ -354,6 +387,7 @@ def build_status(root: Path, db_dir: Path, out_dir: Path) -> dict:
             "runtimeMessage": None,
             "rawFile": file_info(raw_file),
             "outputFile": file_info(output_file),
+            "partitionedOutput": parts,
             "tempFile": file_info(tmp_file),
             "lastLogLine": state.get("lastLogLine"),
         }

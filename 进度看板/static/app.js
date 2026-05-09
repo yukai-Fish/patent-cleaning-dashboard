@@ -109,7 +109,11 @@ function renderYears(years) {
     meta.className = "tile-meta";
     const elapsed = item.elapsedMin ? `${Number(item.elapsedMin).toFixed(1)} 分钟` : "--";
     const size = item.rawFile && item.rawFile.exists ? `${item.rawFile.sizeGB} GB` : "--";
-    const output = item.outputFile && item.outputFile.exists ? `${item.outputFile.sizeGB} GB` : "未生成";
+    const output = item.partitionedOutput && item.partitionedOutput.exists
+      ? `${item.partitionedOutput.partCount} 个分片，${item.partitionedOutput.sizeGB} GB`
+      : item.outputFile && item.outputFile.exists
+        ? `${item.outputFile.sizeGB} GB`
+        : "未生成";
     const phase = item.runtimePhase ? (phaseNames[item.runtimePhase] || item.runtimePhase) : "--";
     meta.innerHTML = `
       <span>进度：${formatPercent(item.percent)}</span>

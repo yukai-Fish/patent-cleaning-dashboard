@@ -19,6 +19,7 @@ import logging
 import math
 import os
 import re
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -30,6 +31,11 @@ try:
     import pyreadstat
 except ImportError:  # pragma: no cover - optional fast writer
     pyreadstat = None
+
+try:
+    import duckdb
+except ImportError:  # pragma: no cover - optional streaming engine
+    duckdb = None
 
 
 GENERATED_PREFIXES = ("inv_", "__")
@@ -205,6 +211,18 @@ def find_year_file(root: Path, year: int) -> Path | None:
         return None
     matches.sort(key=lambda p: p.stat().st_size, reverse=True)
     return matches[0]
+
+
+def parts_dir_for(out_dir: Path, year: int) -> Path:
+    return out_dir / f"patent_{year}_lite_parts"
+
+
+def parts_manifest_for(out_dir: Path, year: int) -> Path:
+    return parts_dir_for(out_dir, year) / "manifest.json"
+
+
+def year_output_exists(out_dir: Path, year: int) -> bool:
+    return (out_dir / f"patent_{year}_lite.dta").exists() or parts_manifest_for(out_dir, year).exists()
 
 
 def setup_logging(out_dir: Path) -> None:
@@ -451,6 +469,211 @@ def write_stata(df: pd.DataFrame, path: Path) -> None:
     )
 
 
+def write_manifest(parts_dir: Path, manifest: dict) -> None:
+    (parts_dir / "manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def clean_one_year_streaming(
+    year: int,
+    root: Path,
+    out_dir: Path,
+    chunksize: int,
+    overwrite: bool,
+    max_rows: int | None,
+    part_rows: int,
+) -> None:
+    if duckdb is None:
+        raise RuntimeError("Streaming engine requires duckdb. Run: python -m pip install duckdb pyarrow")
+
+    outfile = out_dir / f"patent_{year}_lite.dta"
+    final_parts_dir = parts_dir_for(out_dir, year)
+    if year_output_exists(out_dir, year) and not overwrite:
+        logging.info("Year %s already exists, skipping.", year)
+        return
+
+    infile = find_year_file(root, year)
+    if infile is None:
+        logging.warning("Year %s input file not found under %s, skipping.", year, root)
+        return
+
+    tmp_dir = out_dir / f"patent_{year}_stream_tmp"
+    chunk_dir = tmp_dir / "chunks"
+    parts_tmp_dir = out_dir / f"patent_{year}_lite_parts.tmp"
+    duckdb_path = tmp_dir / "dedup.duckdb"
+    for path in [tmp_dir, parts_tmp_dir]:
+        if path.exists():
+            shutil.rmtree(path)
+    chunk_dir.mkdir(parents=True, exist_ok=True)
+    parts_tmp_dir.mkdir(parents=True, exist_ok=True)
+
+    logging.info("=" * 60)
+    logging.info("Cleaning year %s with streaming engine", year)
+    logging.info("Input: %s", infile)
+    logging.info("Output parts: %s", final_parts_dir)
+    write_status(out_dir, year=year, phase="starting", message=f"Year {year}: starting streaming mode", processedRows=0)
+
+    started = time.time()
+    rows_raw = 0
+    rows_chunk_clean = 0
+    chunk_files: list[Path] = []
+    reader = pd.read_stata(str(infile), chunksize=chunksize, convert_categoricals=False)
+    write_status(out_dir, year=year, phase="reading", message=f"Year {year}: reading and writing cleaned chunks", processedRows=0)
+
+    for chunk_no, chunk in enumerate(reader, start=1):
+        if max_rows is not None:
+            remaining = max_rows - rows_raw
+            if remaining <= 0:
+                break
+            chunk = chunk.head(remaining)
+        raw_len = len(chunk)
+        rows_raw += raw_len
+        cleaned = clean_chunk(chunk, year)
+        cleaned["__chunk_no"] = chunk_no
+        cleaned["__row_no"] = np.arange(1, len(cleaned) + 1, dtype=np.int64)
+        cleaned = cleaned.sort_values(["dup_key", "type_rank", "file_year", "__row_no"], kind="mergesort")
+        cleaned = cleaned.drop_duplicates(subset=["dup_key"], keep="first").reset_index(drop=True)
+        rows_chunk_clean += len(cleaned)
+        part_path = chunk_dir / f"chunk_{chunk_no:04d}.parquet"
+        cleaned.to_parquet(part_path, index=False)
+        chunk_files.append(part_path)
+        logging.info(
+            "Year %s chunk %s: raw rows processed = %s; chunk rows after local dedup = %s",
+            year,
+            chunk_no,
+            rows_raw,
+            len(cleaned),
+        )
+        write_status(
+            out_dir,
+            year=year,
+            phase="reading",
+            message=f"Year {year}: reading raw data and writing cleaned chunk files",
+            processedRows=rows_raw,
+            chunk=chunk_no,
+            chunkRowsAfterLocalDedup=len(cleaned),
+        )
+        del chunk, cleaned
+        if max_rows is not None and rows_raw >= max_rows:
+            break
+
+    if not chunk_files:
+        logging.warning("Year %s has no rows after reading.", year)
+        write_status(out_dir, year=year, phase="empty", message=f"Year {year}: no rows found", processedRows=0)
+        return
+
+    logging.info("Year %s finished chunk cleaning; local-dedup rows = %s", year, rows_chunk_clean)
+    write_status(
+        out_dir,
+        year=year,
+        phase="deduplicating",
+        message=f"Year {year}: disk-based global deduplication",
+        processedRows=rows_raw,
+        beforeDedup=rows_chunk_clean,
+    )
+
+    parquet_glob = str(chunk_dir / "*.parquet").replace("\\", "/")
+    con = duckdb.connect(str(duckdb_path))
+    con.execute("PRAGMA threads=2")
+    con.execute("PRAGMA memory_limit='6GB'")
+    con.execute(f"""
+        CREATE TABLE winners AS
+        SELECT * EXCLUDE (rn)
+        FROM (
+            SELECT *,
+                   row_number() OVER (
+                       PARTITION BY dup_key
+                       ORDER BY type_rank, file_year, __chunk_no, __row_no
+                   ) AS rn
+            FROM read_parquet('{parquet_glob}')
+        )
+        WHERE rn = 1
+    """)
+    rows_after = con.execute("SELECT count(*) FROM winners").fetchone()[0]
+    logging.info("Year %s after disk global dedup rows = %s", year, rows_after)
+
+    export_columns = con.execute("DESCRIBE winners").fetchdf()["column_name"].tolist()
+    export_columns = [col for col in export_columns if col not in {"__chunk_no", "__row_no"}]
+    quoted_cols = ", ".join(f'"{col}"' for col in export_columns)
+    total_parts = math.ceil(rows_after / part_rows)
+    parts = []
+
+    write_status(
+        out_dir,
+        year=year,
+        phase="writing",
+        message=f"Year {year}: writing {total_parts} dta part files",
+        processedRows=rows_raw,
+        beforeDedup=rows_chunk_clean,
+        afterDedup=rows_after,
+    )
+    for part_no, offset in enumerate(range(0, rows_after, part_rows), start=1):
+        limit = min(part_rows, rows_after - offset)
+        part_name = f"patent_{year}_lite_part{part_no:03d}.dta"
+        part_path = parts_tmp_dir / part_name
+        logging.info("Year %s writing dta part %s/%s: rows %s-%s", year, part_no, total_parts, offset + 1, offset + limit)
+        write_status(
+            out_dir,
+            year=year,
+            phase="writing",
+            message=f"Year {year}: writing dta part {part_no}/{total_parts}",
+            processedRows=rows_raw,
+            beforeDedup=rows_chunk_clean,
+            afterDedup=rows_after,
+            part=part_no,
+            partCount=total_parts,
+        )
+        df_part = con.execute(
+            f"SELECT {quoted_cols} FROM winners ORDER BY dup_key LIMIT {limit} OFFSET {offset}"
+        ).fetchdf()
+        write_stata(df_part, part_path)
+        parts.append({"file": part_name, "rows": int(limit), "firstRow": int(offset + 1), "lastRow": int(offset + limit)})
+        del df_part
+
+    con.close()
+    manifest = {
+        "year": year,
+        "mode": "streaming_parts",
+        "rawRows": int(rows_raw),
+        "beforeDedup": int(rows_chunk_clean),
+        "afterDedup": int(rows_after),
+        "partRows": int(part_rows),
+        "partCount": int(total_parts),
+        "parts": parts,
+        "createdAt": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    write_manifest(parts_tmp_dir, manifest)
+    if final_parts_dir.exists():
+        shutil.rmtree(final_parts_dir)
+    os.replace(parts_tmp_dir, final_parts_dir)
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    elapsed = time.time() - started
+    logging.info(
+        "Year %s complete: raw=%s before_dedup=%s after_dedup=%s elapsed_min=%.2f output_mode=streaming_parts part_count=%s",
+        year,
+        rows_raw,
+        rows_chunk_clean,
+        rows_after,
+        elapsed / 60,
+        total_parts,
+    )
+    write_status(
+        out_dir,
+        year=year,
+        phase="complete",
+        message=f"Year {year}: complete as dta parts",
+        processedRows=rows_raw,
+        beforeDedup=rows_chunk_clean,
+        afterDedup=rows_after,
+        elapsedMin=round(elapsed / 60, 2),
+        output=str(final_parts_dir),
+        partCount=total_parts,
+    )
+
+
 def clean_one_year(
     year: int,
     root: Path,
@@ -620,6 +843,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--root", type=Path, default=None, help="Directory containing yearly raw .dta files.")
     parser.add_argument("--out", type=Path, default=None, help="Directory for yearly lite .dta files.")
     parser.add_argument("--chunksize", type=int, default=100_000)
+    parser.add_argument("--engine", choices=["standard", "streaming"], default="standard")
+    parser.add_argument("--part-rows", type=int, default=500_000, help="Rows per output .dta part in streaming mode.")
     parser.add_argument("--overwrite", action="store_true", help="Rebuild years whose output files already exist.")
     parser.add_argument("--max-rows", type=int, default=None, help="Debug option: process only the first N rows per year.")
     return parser.parse_args()
@@ -637,16 +862,28 @@ def main() -> int:
     logging.info("Root directory: %s", root)
     logging.info("Output directory: %s", out_dir)
     logging.info("Year range: %s-%s", args.start_year, args.end_year)
+    logging.info("Engine: %s", args.engine)
 
     for year in range(args.start_year, args.end_year + 1):
-        clean_one_year(
-            year=year,
-            root=root,
-            out_dir=out_dir,
-            chunksize=args.chunksize,
-            overwrite=args.overwrite,
-            max_rows=args.max_rows,
-        )
+        if args.engine == "streaming":
+            clean_one_year_streaming(
+                year=year,
+                root=root,
+                out_dir=out_dir,
+                chunksize=args.chunksize,
+                overwrite=args.overwrite,
+                max_rows=args.max_rows,
+                part_rows=args.part_rows,
+            )
+        else:
+            clean_one_year(
+                year=year,
+                root=root,
+                out_dir=out_dir,
+                chunksize=args.chunksize,
+                overwrite=args.overwrite,
+                max_rows=args.max_rows,
+            )
     logging.info("All requested years finished.")
     return 0
 

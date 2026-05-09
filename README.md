@@ -42,6 +42,26 @@ lite输出/patent_YYYY_lite.dta
 
 如果中断后重新运行，已经完成的年份会自动跳过。
 
+## 大年份流式模式
+
+2020 年以后文件较大，推荐使用低内存流式模式：
+
+```powershell
+python ".\do文件\build_patent_lite_feature_py.py" --start-year 2020 --end-year 2024 --engine streaming
+```
+
+流式模式会先把每个清洗后的数据块写成临时 Parquet，再用 DuckDB 做磁盘级去重，最后输出多个 `.dta` 分片：
+
+```text
+lite输出/patent_2020_lite_parts/
+  manifest.json
+  patent_2020_lite_part001.dta
+  patent_2020_lite_part002.dta
+  ...
+```
+
+这种模式不会把全年数据一直堆在内存里，更适合 2020-2023 这类大年份。
+
 ## 日志
 
 Python 清洗日志默认写入：
