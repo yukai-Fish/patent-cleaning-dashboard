@@ -275,21 +275,51 @@ def setup_logging(out_dir: Path) -> None:
     )
 
 
-def read_stata_chunks(infile: Path, chunksize: int):
-    try:
-        return pd.read_stata(
-            str(infile),
-            chunksize=chunksize,
-            convert_categoricals=False,
-            columns=RAW_KEEP_COLUMNS,
-        )
-    except Exception as exc:
-        logging.warning(
-            "Column-selective read failed for %s (%s). Falling back to full-column read.",
-            infile,
-            exc,
-        )
-        return pd.read_stata(str(infile), chunksize=chunksize, convert_categoricals=False)
+def read_stata_chunks(infile: Path, chunksize: int, start_row: int = 0):
+    start_row = max(0, start_row)
+    if pyreadstat is not None:
+        try:
+            _, meta = pyreadstat.read_dta(str(infile), metadataonly=True)
+            available = set(meta.column_names)
+            usecols = [column for column in RAW_KEEP_COLUMNS if column in available]
+            row_offset = start_row
+            while True:
+                chunk, _ = pyreadstat.read_dta(
+                    str(infile),
+                    usecols=usecols,
+                    row_limit=chunksize,
+                    row_offset=row_offset,
+                    disable_datetime_conversion=True,
+                )
+                if chunk.empty:
+                    break
+                yield chunk
+                if len(chunk) < chunksize:
+                    break
+                row_offset += chunksize
+            return
+        except Exception as exc:
+            logging.warning(
+                "Offset-capable pyreadstat read failed for %s (%s). Falling back to pandas read_stata.",
+                infile,
+                exc,
+            )
+
+    if start_row:
+        logging.warning("Pandas Stata reader cannot seek; it will scan and discard %s rows.", start_row)
+    reader = pd.read_stata(
+        str(infile),
+        chunksize=chunksize,
+        convert_categoricals=False,
+        columns=RAW_KEEP_COLUMNS,
+    )
+    for chunk_no, chunk in enumerate(reader, start=1):
+        chunk_start = (chunk_no - 1) * chunksize
+        if chunk_start + len(chunk) <= start_row:
+            continue
+        if chunk_start < start_row:
+            chunk = chunk.iloc[start_row - chunk_start :]
+        yield chunk
 
 
 def existing_stream_chunks(chunk_dir: Path) -> list[Path]:
@@ -304,6 +334,43 @@ def existing_stream_chunks(chunk_dir: Path) -> list[Path]:
 
 def parquet_row_count(path: Path) -> int:
     return int(pd.read_parquet(path, columns=["dup_key"]).shape[0])
+
+
+def resume_processed_rows(out_dir: Path, year: int, fallback_rows: int) -> int:
+    processed_candidates = [fallback_rows]
+    path = status_path(out_dir)
+    if path.exists():
+        try:
+            status = json.loads(path.read_text(encoding="utf-8"))
+            if status.get("year") == year:
+                processed_candidates.append(int(status.get("processedRows") or 0))
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            pass
+
+    log_pattern = re.compile(
+        rf"Year {year} chunk \d+: raw rows processed = ([\d,]+); chunk rows after local dedup = \d+"
+    )
+    for log_path in out_dir.glob("*cleaning*stdout.log"):
+        try:
+            lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lines[-2000:]:
+            match = log_pattern.search(line)
+            if match:
+                processed_candidates.append(int(match.group(1).replace(",", "")))
+    main_log = out_dir / "patent_python_cleaning.log"
+    if main_log.exists():
+        try:
+            lines = main_log.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            lines = []
+        for line in lines[-4000:]:
+            match = log_pattern.search(line)
+            if match:
+                processed_candidates.append(int(match.group(1).replace(",", "")))
+
+    return max(processed_candidates)
 
 
 def status_path(out_dir: Path) -> Path:
@@ -589,7 +656,7 @@ def clean_one_year_streaming(
     started = time.time()
     chunk_files: list[Path] = existing_stream_chunks(chunk_dir)
     resume_chunks = len(chunk_files)
-    rows_raw = resume_chunks * chunksize
+    rows_raw = resume_processed_rows(out_dir, year, fallback_rows=resume_chunks * chunksize)
     rows_chunk_clean = sum(parquet_row_count(path) for path in chunk_files)
     if resume_chunks:
         logging.info(
@@ -601,20 +668,21 @@ def clean_one_year_streaming(
     else:
         rows_raw = 0
         rows_chunk_clean = 0
-    reader = read_stata_chunks(infile, chunksize)
+    reader = read_stata_chunks(infile, chunksize, start_row=rows_raw)
     write_status(
         out_dir,
         year=year,
         phase="reading",
-        message=f"Year {year}: reading and writing cleaned chunks",
+        message=(
+            f"Year {year}: seeking to resume row {rows_raw + 1}"
+            if resume_chunks
+            else f"Year {year}: reading and writing cleaned chunks"
+        ),
         processedRows=rows_raw,
         chunk=resume_chunks,
     )
 
-    for chunk_no, chunk in enumerate(reader, start=1):
-        if chunk_no <= resume_chunks:
-            del chunk
-            continue
+    for chunk_no, chunk in enumerate(reader, start=resume_chunks + 1):
         if max_rows is not None:
             remaining = max_rows - rows_raw
             if remaining <= 0:
