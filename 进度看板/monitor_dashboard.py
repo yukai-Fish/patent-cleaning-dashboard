@@ -183,6 +183,46 @@ def cleaner_script(root: Path) -> Path:
 
 
 def cleaner_processes() -> list[dict]:
+    if os.name != "nt":
+        try:
+            result = subprocess.run(
+                ["ps", "-eo", "pid=,pcpu=,rss=,args="],
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=10,
+            )
+        except Exception:
+            return []
+        processes = []
+        for line in result.stdout.splitlines():
+            if "build_patent_lite_feature_py.py" not in line or "python" not in line:
+                continue
+            parts = line.strip().split(None, 3)
+            if len(parts) < 4:
+                continue
+            pid_text, cpu_text, rss_text, command = parts
+            try:
+                pid = int(pid_text)
+                rss_bytes = int(float(rss_text)) * 1024
+                cpu_percent = float(cpu_text)
+            except ValueError:
+                continue
+            processes.append(
+                {
+                    "pid": pid,
+                    "name": "python",
+                    "commandLine": command,
+                    "cpuPercent": cpu_percent,
+                    "workingSetBytes": rss_bytes,
+                    "privateBytes": rss_bytes,
+                    "startTime": None,
+                }
+            )
+        return processes
+
     command = r"""
 $items = Get-CimInstance Win32_Process |
   Where-Object { $_.Name -like 'python*' -and $_.CommandLine -like '*build_patent_lite_feature_py.py*' }

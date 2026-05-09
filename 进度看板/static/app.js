@@ -77,10 +77,10 @@ function renderOverview(data) {
   if (data.cleanerRunning) {
     const details = data.cleanerProcesses.map((p) => {
       const memory = formatGBFromBytes(p.privateBytes || p.workingSetBytes);
-      const cpu = p.cpuSeconds === null || p.cpuSeconds === undefined
-        ? "--"
-        : Number(p.cpuSeconds).toFixed(0);
-      return `PID ${p.pid}，内存 ${memory} GB，CPU ${cpu} 秒`;
+      const cpu = p.cpuPercent === null || p.cpuPercent === undefined
+        ? (p.cpuSeconds === null || p.cpuSeconds === undefined ? "--" : `${Number(p.cpuSeconds).toFixed(0)} 秒`)
+        : `${Number(p.cpuPercent).toFixed(1)}%`;
+      return `PID ${p.pid}，内存 ${memory} GB，CPU ${cpu}`;
     }).join("；");
     $("processState").textContent = `清洗进程：运行中，${details}`;
   } else {
