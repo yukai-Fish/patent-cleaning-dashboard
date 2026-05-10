@@ -26,6 +26,14 @@ LOG_PATTERNS = {
     "skip": re.compile(r"Year (\d{4}) already exists, skipping"),
 }
 STALE_AFTER_SECONDS = 180
+DOWNLOAD_DIR_SIZES = {
+    "patent_2020_lite_parts": 17_082_120_708,
+    "patent_2021_lite_parts": 16_690_512_024,
+    "patent_2022_lite_parts": 14_424_577_246,
+    "patent_2023_lite_parts": 13_808_053_931,
+    "patent_2024_lite_parts": 184_189_864,
+}
+DOWNLOAD_TOTAL_BYTES = sum(DOWNLOAD_DIR_SIZES.values())
 
 
 def workspace_root() -> Path:
@@ -277,6 +285,164 @@ if ($items) {
     ]
 
 
+def download_processes() -> list[dict]:
+    if os.name != "nt":
+        return []
+
+    command = r"""
+$items = Get-CimInstance Win32_Process |
+  Where-Object { $_.CommandLine -like '*download_9gpu_outputs.ps1*' -or $_.Name -eq 'scp.exe' }
+if ($items) {
+  $items | ForEach-Object {
+    [pscustomobject]@{
+      ProcessId = $_.ProcessId
+      Name = $_.Name
+      CommandLine = $_.CommandLine
+    }
+  } | ConvertTo-Json -Compress
+}
+"""
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", command],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+        )
+    except Exception:
+        return []
+    output = result.stdout.strip()
+    if not output:
+        return []
+    try:
+        data = json.loads(output)
+    except json.JSONDecodeError:
+        return []
+    if isinstance(data, dict):
+        data = [data]
+    current_pid = os.getpid()
+    return [
+        {
+            "pid": item.get("ProcessId"),
+            "name": item.get("Name"),
+            "commandLine": item.get("CommandLine"),
+        }
+        for item in data
+        if item.get("ProcessId")
+        and item.get("ProcessId") != current_pid
+        and "Get-CimInstance Win32_Process" not in str(item.get("CommandLine") or "")
+    ]
+
+
+def dir_size(path: Path) -> int:
+    if not path.exists():
+        return 0
+    total = 0
+    for child in path.rglob("*"):
+        try:
+            if child.is_file():
+                total += child.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def parse_iso_after_prefix(line: str, prefix: str) -> datetime | None:
+    if not line.startswith(prefix):
+        return None
+    value = line[len(prefix) :].strip()
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def build_download_status(root: Path) -> dict:
+    local_dir = root / "server_outputs"
+    log_path = root / "download_9gpu.log"
+    lines = tail_lines(log_path, max_bytes=80_000) if log_path.exists() else []
+    start_time = None
+    current_item = None
+    completed_items: set[str] = set()
+    last_line = lines[-1] if lines else None
+
+    for line in lines:
+        line = line.lstrip("\ufeff")
+        if line.startswith("DOWNLOAD START "):
+            start_time = parse_iso_after_prefix(line, "DOWNLOAD START ")
+        elif line.startswith("START "):
+            parts = line.split()
+            if len(parts) >= 2:
+                current_item = parts[1]
+        elif line.startswith("END "):
+            parts = line.split()
+            if len(parts) >= 2:
+                completed_items.add(parts[1])
+                if current_item == parts[1]:
+                    current_item = None
+
+    items = []
+    downloaded_bytes = 0
+    for name, total_bytes in DOWNLOAD_DIR_SIZES.items():
+        path = local_dir / name
+        bytes_done = min(dir_size(path), total_bytes)
+        downloaded_bytes += bytes_done
+        complete = bytes_done >= total_bytes or name in completed_items
+        if complete:
+            status = "completed"
+        elif name == current_item and bytes_done > 0:
+            status = "running"
+        elif bytes_done > 0:
+            status = "partial"
+        else:
+            status = "pending"
+        items.append(
+            {
+                "name": name,
+                "year": name.split("_")[1],
+                "status": status,
+                "bytes": bytes_done,
+                "totalBytes": total_bytes,
+                "percent": round((bytes_done / total_bytes * 100) if total_bytes else 0, 2),
+                "path": str(path),
+            }
+        )
+
+    processes = download_processes()
+    running = bool(processes)
+    now = datetime.now()
+    elapsed_seconds = None
+    speed_bps = None
+    eta_seconds = None
+    if start_time:
+        elapsed_seconds = max(1, int((now - start_time).total_seconds()))
+        speed_bps = downloaded_bytes / elapsed_seconds if downloaded_bytes else None
+        if speed_bps:
+            eta_seconds = int(max(0, DOWNLOAD_TOTAL_BYTES - downloaded_bytes) / speed_bps)
+
+    percent = round((downloaded_bytes / DOWNLOAD_TOTAL_BYTES * 100) if DOWNLOAD_TOTAL_BYTES else 0, 2)
+    return {
+        "exists": local_dir.exists() or log_path.exists(),
+        "localDir": str(local_dir),
+        "logPath": str(log_path),
+        "running": running,
+        "processes": processes,
+        "currentItem": current_item,
+        "downloadedBytes": downloaded_bytes,
+        "totalBytes": DOWNLOAD_TOTAL_BYTES,
+        "percent": percent,
+        "speedBytesPerSecond": speed_bps,
+        "etaSeconds": eta_seconds,
+        "elapsedSeconds": elapsed_seconds,
+        "updatedAt": now.isoformat(timespec="seconds"),
+        "lastLogLine": last_line,
+        "items": items,
+    }
+
+
 def stop_cleaner_processes() -> dict:
     processes = cleaner_processes()
     stopped = []
@@ -488,6 +654,7 @@ def build_status(root: Path, db_dir: Path, out_dir: Path) -> dict:
         "completedRows": completed_rows,
         "years": year_items,
         "recentLog": recent,
+        "downloadStatus": build_download_status(root),
     }
 
 

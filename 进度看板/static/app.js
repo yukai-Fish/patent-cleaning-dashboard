@@ -5,6 +5,7 @@ const stateNames = {
   running: "运行中",
   stopped: "已停止",
   pending: "等待中",
+  partial: "部分完成",
 };
 
 const phaseNames = {
@@ -38,6 +39,22 @@ function formatGBFromBytes(value) {
   return (Number(value) / 1024 / 1024 / 1024).toFixed(2);
 }
 
+function formatMBPerSecond(value) {
+  if (!value || Number.isNaN(Number(value))) return "--";
+  return (Number(value) / 1024 / 1024).toFixed(2);
+}
+
+function formatDuration(seconds) {
+  if (seconds === null || seconds === undefined || Number.isNaN(Number(seconds))) return "--";
+  const total = Math.max(0, Math.round(Number(seconds)));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const secs = total % 60;
+  if (hours > 0) return `${hours}小时${minutes}分钟`;
+  if (minutes > 0) return `${minutes}分钟${secs}秒`;
+  return `${secs}秒`;
+}
+
 function setConnection(ok, text) {
   const el = $("connectionState");
   el.textContent = text;
@@ -64,7 +81,7 @@ function renderOverview(data) {
       ? `阶段：${phaseNames[current.runtimePhase] || current.runtimePhase}`
       : "";
     const detail = current.status === "completed"
-      ? `${current.year} 年已经完成，输出文件 ${(current.outputFile && current.outputFile.sizeGB) || "--"} GB。`
+      ? `${current.year} 年已经完成，输出文件 ${(current.partitionedOutput && current.partitionedOutput.sizeGB) || (current.outputFile && current.outputFile.sizeGB) || "--"} GB。`
       : current.status === "running"
         ? `${current.year} 年正在处理，已读 ${formatNumber(current.processedRows)} 行，总计 ${formatNumber(current.totalRows)} 行。${phaseText ? " " + phaseText : ""}`
         : `${current.year} 年尚未开始；页面会在日志更新后自动切换。`;
@@ -89,7 +106,7 @@ function renderOverview(data) {
   const staleText = data.logStaleSeconds === null || data.logStaleSeconds === undefined
     ? "日志心跳：暂无日志"
     : data.logStale
-      ? `日志心跳：${data.logStaleSeconds} 秒未更新；如果进程仍在运行，多半是在等待下一块 dta 读完`
+      ? `日志心跳：${data.logStaleSeconds} 秒未更新；如果进程仍在运行，多半是在等下一块 dta 读完`
       : `日志心跳：${data.logStaleSeconds} 秒前更新`;
   $("staleState").textContent = staleText;
   $("staleState").classList.toggle("warn", Boolean(data.logStale));
@@ -97,6 +114,32 @@ function renderOverview(data) {
   $("stopButton").disabled = !data.cleanerRunning;
   $("workspacePath").textContent = data.workspace || "";
   $("logPath").textContent = data.logPath || "";
+}
+
+function renderDownload(download) {
+  if (!download) return;
+  const pct = download.percent || 0;
+  $("downloadBar").style.width = `${pct}%`;
+  $("downloadBadge").textContent = download.running ? "下载中" : pct >= 99.99 ? "下载完成" : "未运行";
+  $("downloadBytes").textContent = `${formatGBFromBytes(download.downloadedBytes)} / ${formatGBFromBytes(download.totalBytes)} GB`;
+  $("downloadSpeed").textContent = `速度：${formatMBPerSecond(download.speedBytesPerSecond)} MB/s`;
+  $("downloadEta").textContent = `预计剩余：${formatDuration(download.etaSeconds)}`;
+  $("downloadCurrent").textContent = `当前：${download.currentItem || "--"}`;
+  $("downloadDetail").textContent = `已完成 ${formatPercent(pct)}，保存位置：${download.localDir || "--"}`;
+
+  const container = $("downloadItems");
+  container.innerHTML = "";
+  for (const item of download.items || []) {
+    const row = document.createElement("div");
+    row.className = `download-row ${item.status}`;
+    row.innerHTML = `
+      <strong>${item.year}</strong>
+      <span>${stateNames[item.status] || item.status}</span>
+      <span>${formatGBFromBytes(item.bytes)} / ${formatGBFromBytes(item.totalBytes)} GB</span>
+      <div class="mini-progress"><div style="width: ${item.percent || 0}%"></div></div>
+    `;
+    container.appendChild(row);
+  }
 }
 
 function renderYears(years) {
@@ -160,6 +203,7 @@ async function refresh() {
     const data = await response.json();
     setConnection(true, "实时连接");
     renderOverview(data);
+    renderDownload(data.downloadStatus);
     renderYears(data.years || []);
     renderLog(data.recentLog || []);
   } catch (error) {

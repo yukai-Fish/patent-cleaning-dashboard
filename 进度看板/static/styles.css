@@ -274,6 +274,44 @@ h2 {
   transition: width 450ms ease;
 }
 
+.download-panel {
+  margin-top: 18px;
+}
+
+.download-items {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.download-row {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  background: #f8f3e9;
+  padding: 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.download-row strong {
+  color: var(--ink);
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 24px;
+}
+
+.download-row.completed {
+  background: #e6efe6;
+}
+
+.download-row.running,
+.download-row.partial {
+  border-color: var(--green);
+  background: #edf7ef;
+}
+
 .grid-area {
   display: grid;
   grid-template-columns: minmax(0, 1.35fr) minmax(360px, 0.65fr);
@@ -408,6 +446,10 @@ pre {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .download-items {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   h1 {
     font-size: 56px;
   }
@@ -446,6 +488,10 @@ pre {
   }
 
   .year-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .download-items {
     grid-template-columns: 1fr;
   }
 

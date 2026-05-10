@@ -12,7 +12,7 @@
         <div>
           <p class="eyebrow">Patent Cleaning Monitor</p>
           <h1>专利清洗进度看板</h1>
-          <p class="subhead">实时读取 Python 清洗日志和输出文件，显示当前年份、年度百分比和整体推进情况。</p>
+          <p class="subhead">实时读取 Python 清洗日志、输出文件和下载目录，显示当前年份、清洗进度、下载进度和预计剩余时间。</p>
         </div>
         <div class="status-pill" id="connectionState">连接中</div>
       </section>
@@ -63,6 +63,28 @@
           <span>1985-2012 已由前序流程完成；此看板追踪 2013-2024 Python 清洗。</span>
           <div class="mini-progress"><div id="overallBar"></div></div>
         </div>
+      </section>
+
+      <section class="progress-panel download-panel">
+        <div class="panel-head">
+          <div>
+            <h2>服务器结果下载</h2>
+            <p id="downloadDetail">正在检测从服务器下载到本机 F 盘的进度。</p>
+          </div>
+          <div class="panel-actions">
+            <span id="downloadBadge" class="badge">下载检测中</span>
+          </div>
+        </div>
+        <div class="runtime-line">
+          <span id="downloadBytes">-- / -- GB</span>
+          <span id="downloadSpeed">速度：-- MB/s</span>
+          <span id="downloadEta">预计剩余：--</span>
+          <span id="downloadCurrent">当前：--</span>
+        </div>
+        <div class="big-progress" aria-label="下载进度">
+          <div id="downloadBar" class="bar-fill"></div>
+        </div>
+        <div id="downloadItems" class="download-items"></div>
       </section>
 
       <section class="grid-area">
