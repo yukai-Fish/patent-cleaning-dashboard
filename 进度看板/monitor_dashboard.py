@@ -361,8 +361,14 @@ def parse_iso_after_prefix(line: str, prefix: str) -> datetime | None:
 
 
 def build_download_status(root: Path) -> dict:
-    local_dir = root / "server_outputs"
+    transfer_dir = root / "server_outputs"
+    final_dir = root / "lite输出"
+    local_dir = transfer_dir if transfer_dir.exists() else final_dir
     log_path = root / "download_9gpu.log"
+    if not log_path.exists():
+        archived_log = root / "运行日志" / "download_9gpu.log"
+        if archived_log.exists():
+            log_path = archived_log
     lines = tail_lines(log_path, max_bytes=80_000) if log_path.exists() else []
     start_time = None
     current_item = None
@@ -387,7 +393,9 @@ def build_download_status(root: Path) -> dict:
     items = []
     downloaded_bytes = 0
     for name, total_bytes in DOWNLOAD_DIR_SIZES.items():
-        path = local_dir / name
+        transfer_path = transfer_dir / name
+        final_path = final_dir / name
+        path = transfer_path if transfer_path.exists() else final_path
         bytes_done = min(dir_size(path), total_bytes)
         downloaded_bytes += bytes_done
         complete = bytes_done >= total_bytes or name in completed_items
